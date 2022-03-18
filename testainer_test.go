@@ -10,18 +10,18 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestRunContainer(t *testing.T) {
-	config := Config{
+var (
+	nginxConfig = Config{
 		Registry: DockerHubLibraryRegistry,
 		Image:    `nginx`,
 		Tag:      `1.21`,
 		Port:     80,
-		Env: map[string]string{
-			"SOMETHING": "ARBITRARY",
-		},
 	}
+)
+
+func TestRun(t *testing.T) {
 	ctx := context.Background()
-	containerDetails, cleanup, err := Run(ctx, config)
+	containerDetails, cleanup, err := Run(ctx, nginxConfig)
 	if !assert.NoError(t, err) {
 		t.FailNow()
 	}
@@ -33,16 +33,7 @@ func TestRunContainer(t *testing.T) {
 	assertTCPPortOpen(t, containerDetails.Port)
 }
 
-func TestUseContainer(t *testing.T) {
-	config := Config{
-		Registry: DockerHubLibraryRegistry,
-		Image:    `nginx`,
-		Tag:      `1.21`,
-		Port:     80,
-		Env: map[string]string{
-			"SOMETHING": "ARBITRARY",
-		},
-	}
+func TestUse(t *testing.T) {
 	ctx := context.Background()
 	callbackExecuted := false
 	callback := func(ctx context.Context, containerDetails ContainerDetails) error {
@@ -52,9 +43,20 @@ func TestUseContainer(t *testing.T) {
 		assertTCPPortOpen(t, containerDetails.Port)
 		return nil
 	}
-	err := Use(ctx, config, callback)
+	err := Use(ctx, nginxConfig, callback)
 	assert.NoError(t, err)
 	assert.True(t, callbackExecuted, "callback was not executed")
+}
+
+func TestRun_ZeroPort(t *testing.T) {
+	ctx := context.Background()
+	config := nginxConfig
+	config.Port = 0
+	_, cleanup, err := Run(ctx, config)
+	assert.ErrorContains(t, err, "port must be non-negative integer")
+	if !assert.Nil(t, cleanup) {
+		defer cleanup()
+	}
 }
 
 func assertTCPPortOpen(t *testing.T, port int) {

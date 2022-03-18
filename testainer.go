@@ -140,17 +140,20 @@ func (t testainer) createCleanupCallback(containerID string) func() error {
 }
 
 func createContainerConfig(c Config) (dockerCreationConfig, error) {
-	hostPort, err := freeport.GetFreePort()
+	image, err := formatImageString(c.Registry, c.Image, c.Tag)
 	if err != nil {
-		return dockerCreationConfig{}, fmt.Errorf("couldn't find free host port: %w", err)
+		return dockerCreationConfig{}, fmt.Errorf("couldn't format docker image name: %w", err)
+	}
+	if c.Port <= 0 {
+		return dockerCreationConfig{}, fmt.Errorf("port must be a non-negative integer, but was %d", c.Port)
 	}
 	containerPort, err := nat.NewPort("tcp", strconv.Itoa(c.Port))
 	if err != nil {
 		return dockerCreationConfig{}, fmt.Errorf("couldn't create cointainer port: %w", err)
 	}
-	image, err := formatImageString(c.Registry, c.Image, c.Tag)
+	hostPort, err := freeport.GetFreePort()
 	if err != nil {
-		return dockerCreationConfig{}, fmt.Errorf("couldn't format docker image name: %w", err)
+		return dockerCreationConfig{}, fmt.Errorf("couldn't find free host port: %w", err)
 	}
 
 	guestConfig := container.Config{
