@@ -50,7 +50,12 @@ func NewTestainer() (Testainer, error) {
 }
 
 func (t testainer) Use(ctx context.Context, config Config, callback CallbackFunc) error {
-	return errors.New("not implemented")
+	containerDetails, cleanupFunc, err := t.Run(ctx, config)
+	if err != nil {
+		return err
+	}
+	defer cleanupFunc()
+	return callback(ctx, containerDetails)
 }
 
 func (t testainer) Run(ctx context.Context, config Config) (ContainerDetails, CleanupFunc, error) {
