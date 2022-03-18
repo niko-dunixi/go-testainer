@@ -2,7 +2,10 @@ package testainer
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -27,6 +30,7 @@ func TestRunContainer(t *testing.T) {
 	}
 	defer cleanup()
 	assert.NotZero(t, containerDetails.Port, "We were not given a valid port to communicate over")
+	assertTCPPortOpen(t, containerDetails.Port)
 }
 
 func TestUseContainer(t *testing.T) {
@@ -45,9 +49,18 @@ func TestUseContainer(t *testing.T) {
 		callbackExecuted = true
 		assert.NotNil(t, ctx, "No context was provided for the container callback")
 		assert.NotZero(t, containerDetails.Port, "We were not given a valid port to communicate over")
+		assertTCPPortOpen(t, containerDetails.Port)
 		return nil
 	}
 	err := Use(ctx, config, callback)
 	assert.NoError(t, err)
 	assert.True(t, callbackExecuted, "callback was not executed")
+}
+
+func assertTCPPortOpen(t *testing.T, port int) {
+	t.Helper()
+	connection, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second*3)
+	if assert.NoError(t, err, "port was not open: %d", port) {
+		assert.NotNil(t, connection, "port was not open: %d", port)
+	}
 }
