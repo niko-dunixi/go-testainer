@@ -15,12 +15,8 @@ import (
 	"github.com/docker/docker/api/types/container"
 	dkr "github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
+	"github.com/paul-nelson-baker/go-testainer/internal/common"
 	"github.com/phayes/freeport"
-)
-
-var (
-	globalClientOnce sync.Once
-	globalClient     Testainer = nil
 )
 
 const (
@@ -39,14 +35,20 @@ type ContainerDetails struct {
 	Port int
 }
 
-type Testainer interface {
-	Use(ctx context.Context, config Config, callback CallbackFunc) error
-	Run(ctx context.Context, config Config) (ContainerDetails, CleanupFunc, error)
+type Testainer[ConfigT, ContainerT any] interface {
+	Use(ctx context.Context, config ConfigT, callback CallbackFunc[ContainerT]) error
+	Run(ctx context.Context, config ConfigT) (*ContainerT, CleanupFunc, error)
 }
 
-type testainer struct {
-	docker *dkr.Client
+type testainer[ConfigT, ContainerT any] struct {
+	docker          *dkr.Client
+	toConfigFunc    common.ConvertFunc[ConfigT, Config]
+	fromDetailsFunc common.ConvertFunc[ContainerDetails, ContainerT]
 }
+
+type CleanupFunc func() error
+
+type CallbackFunc[ContainerT any] func(ctx context.Context, details *ContainerT) error
 
 type dockerCreationConfig struct {
 	hostPort    int
@@ -54,17 +56,19 @@ type dockerCreationConfig struct {
 	hostConfig  container.HostConfig
 }
 
-func NewTestainer() (Testainer, error) {
+func New[ConfigT, ContainerT any](toConfig common.ConvertFunc[ConfigT, Config], fromContainerDetails common.ConvertFunc[ContainerDetails, ContainerT]) (Testainer[ConfigT, ContainerT], error) {
 	docker, err := dkr.NewClientWithOpts(dkr.FromEnv)
 	if err != nil {
 		return nil, fmt.Errorf("could not create docker client: %v", err)
 	}
-	return testainer{
-		docker: docker,
+	return testainer[ConfigT, ContainerT]{
+		docker:          docker,
+		toConfigFunc:    toConfig,
+		fromDetailsFunc: fromContainerDetails,
 	}, nil
 }
 
-func (t testainer) Use(ctx context.Context, config Config, callback CallbackFunc) error {
+func (t testainer[ConfigT, ContainerT]) Use(ctx context.Context, config ConfigT, callback CallbackFunc[ContainerT]) error {
 	containerDetails, cleanupFunc, err := t.Run(ctx, config)
 	if err != nil {
 		return err
@@ -73,47 +77,49 @@ func (t testainer) Use(ctx context.Context, config Config, callback CallbackFunc
 	return callback(ctx, containerDetails)
 }
 
-func (t testainer) Run(ctx context.Context, config Config) (ContainerDetails, CleanupFunc, error) {
+func (t testainer[ConfigT, ContainerT]) Run(ctx context.Context, configT ConfigT) (*ContainerT, CleanupFunc, error) {
+	config := t.toConfigFunc(configT)
 	dockerCreationConfig, err := createContainerConfig(config)
 	if err != nil {
-		return ContainerDetails{}, nil, fmt.Errorf("could not create docker host/container config: %w", err)
+		return nil, nil, fmt.Errorf("could not create docker host/container config: %w", err)
 	}
 	fullyQualfiedImageName, err := formatImageString(config.Registry, config.Image, config.Tag)
 	if err != nil {
-		return ContainerDetails{}, nil, fmt.Errorf("could not determine fully qualified image name: %w", err)
+		return nil, nil, fmt.Errorf("could not determine fully qualified image name: %w", err)
 	}
 	imagePullReader, err := t.docker.ImagePull(ctx, fullyQualfiedImageName, types.ImagePullOptions{})
 	if err != nil {
-		return ContainerDetails{}, nil, fmt.Errorf("could not pull image: %w", err)
+		return nil, nil, fmt.Errorf("could not pull image: %w", err)
 	}
 	defer imagePullReader.Close()
 	if _, err := io.Copy(os.Stderr, imagePullReader); err != nil {
-		return ContainerDetails{}, nil, fmt.Errorf("problem occurred while pulling image: %w", err)
+		return nil, nil, fmt.Errorf("problem occurred while pulling image: %w", err)
 	}
 	container, err := t.docker.ContainerCreate(
 		ctx, &dockerCreationConfig.guestConfig, &dockerCreationConfig.hostConfig, nil, nil,
 		fmt.Sprintf("%s_%d", config.Image, time.Now().Unix()),
 	)
 	if err != nil {
-		return ContainerDetails{}, nil, fmt.Errorf("could not create container: %w", err)
+		return nil, nil, fmt.Errorf("could not create container: %w", err)
 	}
 	dockerCleanup := t.createCleanupCallback(container.ID)
 	if err := t.docker.ContainerStart(ctx, container.ID, types.ContainerStartOptions{}); err != nil {
 		defer dockerCleanup()
-		return ContainerDetails{}, nil, fmt.Errorf("could not start container: %w", err)
+		return nil, nil, fmt.Errorf("could not start container: %w", err)
 	}
 	checkTcpCtx, checkTcpCtxCancel := context.WithTimeout(ctx, time.Duration(60*time.Second))
 	defer checkTcpCtxCancel()
 	if portOpen := checkTCPPort(checkTcpCtx, dockerCreationConfig.hostPort); !portOpen {
 		defer dockerCleanup()
-		return ContainerDetails{}, nil, fmt.Errorf("port never opened: %d", dockerCreationConfig.hostPort)
+		return nil, nil, fmt.Errorf("port never opened: %d", dockerCreationConfig.hostPort)
 	}
-	return ContainerDetails{
+	containerT := t.fromDetailsFunc(ContainerDetails{
 		Port: dockerCreationConfig.hostPort,
-	}, dockerCleanup, nil
+	})
+	return &containerT, dockerCleanup, nil
 }
 
-func (t testainer) createCleanupCallback(containerID string) func() error {
+func (t testainer[ConfigT, ContainerT]) createCleanupCallback(containerID string) func() error {
 	var cleanupOnce sync.Once
 	return func() error {
 		var err error = nil
@@ -228,28 +234,4 @@ func checkTCPPort(ctx context.Context, port int) bool {
 		failed = true
 		return false
 	}
-}
-
-type CleanupFunc func() error
-
-type CallbackFunc func(ctx context.Context, containerDetails ContainerDetails) error
-
-func Use(ctx context.Context, config Config, callback CallbackFunc) error {
-	globalClientInit()
-	return globalClient.Use(ctx, config, callback)
-}
-
-func Run(ctx context.Context, config Config) (ContainerDetails, CleanupFunc, error) {
-	globalClientInit()
-	return globalClient.Run(ctx, config)
-}
-
-func globalClientInit() {
-	globalClientOnce.Do(func() {
-		var err error
-		globalClient, err = NewTestainer()
-		if err != nil {
-			panic("could not initialize testainer client: " + err.Error())
-		}
-	})
 }

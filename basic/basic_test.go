@@ -1,4 +1,4 @@
-package testainer
+package basic
 
 import (
 	"context"
@@ -7,12 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/paul-nelson-baker/go-testainer"
 	"github.com/stretchr/testify/assert"
 )
 
 var (
-	nginxConfig = Config{
-		Registry: DockerHubLibraryRegistry,
+	nginxConfig = testainer.Config{
+		Registry: testainer.DockerHubLibraryRegistry,
 		Image:    `nginx`,
 		Tag:      `1.21`,
 		Port:     80,
@@ -36,7 +37,7 @@ func TestRun(t *testing.T) {
 func TestUse(t *testing.T) {
 	ctx := context.Background()
 	callbackExecuted := false
-	callback := func(ctx context.Context, containerDetails ContainerDetails) error {
+	var callback = func(ctx context.Context, containerDetails *testainer.ContainerDetails) error {
 		callbackExecuted = true
 		assert.NotNil(t, ctx, "No context was provided for the container callback")
 		assert.NotZero(t, containerDetails.Port, "We were not given a valid port to communicate over")
@@ -53,7 +54,7 @@ func TestRun_ZeroPort(t *testing.T) {
 	config := nginxConfig
 	config.Port = 0
 	_, cleanup, err := Run(ctx, config)
-	assert.ErrorContains(t, err, "port must be non-negative integer")
+	assert.ErrorContains(t, err, "port must be a non-negative integer")
 	if !assert.Nil(t, cleanup) {
 		defer cleanup()
 	}
