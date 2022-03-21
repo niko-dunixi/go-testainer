@@ -20,9 +20,12 @@ import (
 )
 
 const (
+	// The dockerhub registry, this is used by default in the cli but must
+	// be done explicitly when programmatically used with the daemon.
 	DockerHubLibraryRegistry = `registry.hub.docker.com/library`
 )
 
+// Congfiguration to start the image with
 type Config struct {
 	Registry string
 	Image    string
@@ -31,6 +34,7 @@ type Config struct {
 	Env      map[string]string
 }
 
+// Generic information about the created container
 type ContainerDetails struct {
 	Port int
 }
@@ -41,9 +45,9 @@ type Testainer[ConfigT, ContainerT any] interface {
 }
 
 type testainer[ConfigT, ContainerT any] struct {
-	docker          *dkr.Client
-	toConfigFunc    common.ConvertFunc[ConfigT, Config]
-	fromDetailsFunc common.ConvertFunc[ContainerDetails, ContainerT]
+	docker         *dkr.Client
+	mapConfigFunc  common.MapFunc[ConfigT, Config]
+	mapDetailsFunc common.MapFunc[ContainerDetails, ContainerT]
 }
 
 type CleanupFunc func() error
@@ -56,15 +60,15 @@ type dockerCreationConfig struct {
 	hostConfig  container.HostConfig
 }
 
-func New[ConfigT, ContainerT any](toConfig common.ConvertFunc[ConfigT, Config], fromContainerDetails common.ConvertFunc[ContainerDetails, ContainerT]) (Testainer[ConfigT, ContainerT], error) {
+func New[ConfigT, ContainerT any](toConfig common.MapFunc[ConfigT, Config], fromContainerDetails common.MapFunc[ContainerDetails, ContainerT]) (Testainer[ConfigT, ContainerT], error) {
 	docker, err := dkr.NewClientWithOpts(dkr.FromEnv)
 	if err != nil {
 		return nil, fmt.Errorf("could not create docker client: %v", err)
 	}
 	return testainer[ConfigT, ContainerT]{
-		docker:          docker,
-		toConfigFunc:    toConfig,
-		fromDetailsFunc: fromContainerDetails,
+		docker:         docker,
+		mapConfigFunc:  toConfig,
+		mapDetailsFunc: fromContainerDetails,
 	}, nil
 }
 
@@ -78,7 +82,7 @@ func (t testainer[ConfigT, ContainerT]) Use(ctx context.Context, config ConfigT,
 }
 
 func (t testainer[ConfigT, ContainerT]) Run(ctx context.Context, configT ConfigT) (*ContainerT, CleanupFunc, error) {
-	config := t.toConfigFunc(configT)
+	config := t.mapConfigFunc(configT)
 	dockerCreationConfig, err := createContainerConfig(config)
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not create docker host/container config: %w", err)
@@ -113,7 +117,7 @@ func (t testainer[ConfigT, ContainerT]) Run(ctx context.Context, configT ConfigT
 		defer dockerCleanup()
 		return nil, nil, fmt.Errorf("port never opened: %d", dockerCreationConfig.hostPort)
 	}
-	containerT := t.fromDetailsFunc(ContainerDetails{
+	containerT := t.mapDetailsFunc(ContainerDetails{
 		Port: dockerCreationConfig.hostPort,
 	})
 	return &containerT, dockerCleanup, nil
@@ -183,6 +187,8 @@ func createContainerConfig(c Config) (dockerCreationConfig, error) {
 	}, nil
 }
 
+// Takes a registry, image, and tag and returns a fully quallified docker
+// image name. `image` is requred, but registry and tag are optional.
 func formatImageString(registry, image, tag string) (string, error) {
 	result := ""
 	if registry != "" {
@@ -200,6 +206,8 @@ func formatImageString(registry, image, tag string) (string, error) {
 	return result, nil
 }
 
+// Converts key value pairs into a slice of strings where each item
+// takes the `key=value` format docker wants.
 func mapAsDockerEnv(m map[string]string) []string {
 	dockerEnvSlice := make([]string, 0, len(m))
 	for k, v := range m {
@@ -208,21 +216,26 @@ func mapAsDockerEnv(m map[string]string) []string {
 	return dockerEnvSlice
 }
 
+// Will wait for the TCP port on `127.0.0.1` to respond to connections.
+// This will check indefinitely until the context is closed. This will
+// return `false` if the context closes before a connection succeeds.
+// This will return `true` if the port is successfully connected. If the
+// context is not properly setup to timeout, this will wait indefinitely.
 func checkTCPPort(ctx context.Context, port int) bool {
 	successChannel := make(chan struct{}, 1)
 	defer close(successChannel)
-	failed := false
+	isDone := false
 	go func() {
-		for !failed {
+		for !isDone {
 			connection, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second*3)
 			if err != nil {
-				time.Sleep(time.Second * 3)
+				time.Sleep(time.Millisecond * 500)
 				continue
 			}
 			if connection != nil {
 				defer connection.Close()
 				successChannel <- struct{}{}
-				return
+				isDone = true
 			}
 		}
 	}()
@@ -231,7 +244,7 @@ func checkTCPPort(ctx context.Context, port int) bool {
 	case <-successChannel:
 		return true
 	case <-ctx.Done():
-		failed = true
+		isDone = true
 		return false
 	}
 }
